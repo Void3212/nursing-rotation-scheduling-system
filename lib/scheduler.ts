@@ -142,14 +142,22 @@ export function createAssignments(
 
   for (let week = 1; week <= weekCount; week += 1) {
     const assignedThisWeek = new Set<string>()
+    const categoryAmCapacity = (category: RotationCategory) =>
+      category.areas.reduce((total, area) => total + area.capacity, 0)
+    const categoryAmUsage = (category: RotationCategory) =>
+      category.areas.reduce((total, area) => total + (usage.get(`${week}:${area.name}:AM`) ?? 0), 0)
     for (const group of groups) {
       const reservation = requiredAssignments.get(`${week}:${group}`)
       if (!reservation) continue
       const { category, area } = reservation
       const availableShifts = shuffle(shifts.filter((shift) =>
         (shift !== 'NOC' || area.allowNoc !== false)
+        && (shift !== 'PM' || categoryAmUsage(category) >= categoryAmCapacity(category))
         && (usage.get(`${week}:${area.name}:${shift}`) ?? 0) < area.capacity,
-      )).sort((left, right) => (usage.get(`${week}:${area.name}:${left}`) ?? 0) - (usage.get(`${week}:${area.name}:${right}`) ?? 0))
+      )).sort((left, right) =>
+        shifts.indexOf(left) - shifts.indexOf(right)
+        || (usage.get(`${week}:${area.name}:${left}`) ?? 0) - (usage.get(`${week}:${area.name}:${right}`) ?? 0),
+      )
       const shift = availableShifts[0]
       if (!shift) continue
       assignments.push({ group, category: category.name, area: area.name, week, shift })
@@ -165,46 +173,54 @@ export function createAssignments(
         () => ({ category, area, shift }),
       )),
     )))
-    const optionsByGroup = new Map<string, number[]>()
-    for (const group of groups) {
-      if (assignedThisWeek.has(group)) continue
-      const history = completed.get(group)!
-      const uncompleted = categories.filter((category) => !history.has(category.name) && !reservedCategories.get(group)!.has(category.name))
-      const repeatable = categories.filter((category) => allowSpecialRepeats && specialCategories.has(category.name) && !reservedCategories.get(group)!.has(category.name))
-      const candidates = uncompleted.length ? uncompleted : repeatable
-      const categoryNames = new Set(candidates.map((category) => category.name))
-      optionsByGroup.set(group, shuffle(slots.flatMap((slot, index) =>
-        categoryNames.has(slot.category.name) && (slot.shift !== 'NOC' || slot.area.allowNoc !== false) ? [index] : [],
-      )))
-    }
 
-    const slotOwners = new Map<number, string>()
-    const groupSlots = new Map<string, number>()
-    function matchGroup(group: string, visitedSlots: Set<number>): boolean {
-      for (const slotIndex of optionsByGroup.get(group) ?? []) {
-        if (visitedSlots.has(slotIndex)) continue
-        visitedSlots.add(slotIndex)
-        const currentOwner = slotOwners.get(slotIndex)
-        if (!currentOwner || matchGroup(currentOwner, visitedSlots)) {
-          slotOwners.set(slotIndex, group)
-          groupSlots.set(group, slotIndex)
-          return true
-        }
+    for (const shift of shifts) {
+      const availableSlots = slots.filter((slot) =>
+        slot.shift === shift
+        && (shift !== 'PM' || categoryAmUsage(slot.category) >= categoryAmCapacity(slot.category)),
+      )
+      const optionsByGroup = new Map<string, number[]>()
+      for (const group of groups) {
+        if (assignedThisWeek.has(group)) continue
+        const history = completed.get(group)!
+        const uncompleted = categories.filter((category) => !history.has(category.name) && !reservedCategories.get(group)!.has(category.name))
+        const repeatable = categories.filter((category) => allowSpecialRepeats && specialCategories.has(category.name) && !reservedCategories.get(group)!.has(category.name))
+        const candidates = uncompleted.length ? uncompleted : repeatable
+        const categoryNames = new Set(candidates.map((category) => category.name))
+        optionsByGroup.set(group, shuffle(availableSlots.flatMap((slot, index) =>
+          categoryNames.has(slot.category.name) && (slot.shift !== 'NOC' || slot.area.allowNoc !== false) ? [index] : [],
+        )))
       }
-      return false
-    }
 
-    const unassignedGroups = [...optionsByGroup.keys()].sort((left, right) =>
-      (optionsByGroup.get(left)?.length ?? 0) - (optionsByGroup.get(right)?.length ?? 0),
-    )
-    for (const group of unassignedGroups) matchGroup(group, new Set())
+      const slotOwners = new Map<number, string>()
+      const groupSlots = new Map<string, number>()
+      function matchGroup(group: string, visitedSlots: Set<number>): boolean {
+        for (const slotIndex of optionsByGroup.get(group) ?? []) {
+          if (visitedSlots.has(slotIndex)) continue
+          visitedSlots.add(slotIndex)
+          const currentOwner = slotOwners.get(slotIndex)
+          if (!currentOwner || matchGroup(currentOwner, visitedSlots)) {
+            slotOwners.set(slotIndex, group)
+            groupSlots.set(group, slotIndex)
+            return true
+          }
+        }
+        return false
+      }
 
-    for (const [group, slotIndex] of groupSlots) {
-      const { category, area, shift } = slots[slotIndex]
-      assignments.push({ group, category: category.name, area: area.name, week, shift })
-      completed.get(group)!.add(category.name)
-      const key = `${week}:${area.name}:${shift}`
-      usage.set(key, (usage.get(key) ?? 0) + 1)
+      const unassignedGroups = [...optionsByGroup.keys()].sort((left, right) =>
+        (optionsByGroup.get(left)?.length ?? 0) - (optionsByGroup.get(right)?.length ?? 0),
+      )
+      for (const group of unassignedGroups) matchGroup(group, new Set())
+
+      for (const [group, slotIndex] of groupSlots) {
+        const { category, area } = availableSlots[slotIndex]
+        assignments.push({ group, category: category.name, area: area.name, week, shift })
+        assignedThisWeek.add(group)
+        completed.get(group)!.add(category.name)
+        const key = `${week}:${area.name}:${shift}`
+        usage.set(key, (usage.get(key) ?? 0) + 1)
+      }
     }
   }
 

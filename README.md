@@ -17,7 +17,7 @@ The planner works without cloud credentials and stores configuration and schedul
 4. Enable email authentication and configure the project's allowed redirect URLs to include the local app URL and deployed app URL.
 5. Restart the dev server, open Settings, request an email sign-in link, and follow the link. Cloud history is available to authenticated users; local saves remain available without signing in.
 
-The generator assigns one group per week where configured capacity allows. Area capacity is enforced independently for each shift. The validation report lists missing assignments, category coverage and capacity issues rather than silently exceeding a constraint.
+The generator assigns one group per week where configured capacity allows. It fills AM capacity first in each category and uses PM only after all AM capacity in that category is occupied. Area capacity is enforced independently for each shift. The validation report lists missing assignments, category coverage and capacity issues rather than silently exceeding a constraint.
 
 ## Checks
 
