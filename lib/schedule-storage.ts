@@ -10,6 +10,7 @@ export type SavedSchedule = {
   categories: RotationCategory[]
   assignments: Assignment[]
   validationErrors: string[]
+  preferred?: boolean
 }
 
 const storageKey = 'clinica.rotation-schedules.v1'

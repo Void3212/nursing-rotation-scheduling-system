@@ -2,6 +2,29 @@ export type RotationArea = { name: string; capacity: number; allowNoc?: boolean;
 export type RotationCategory = { name: string; areas: RotationArea[] }
 export type Assignment = { group: string; category: string; area: string; week: number; shift: string }
 
+export function isScheduleWarning(message: string) {
+  return message.includes(' is not assigned in Week ') || message.includes(' has not completed ')
+}
+
+export function scorePreferredAssignments(assignments: Assignment[], preferredSchedules: Assignment[][]) {
+  const preferenceCounts = new Map<string, Map<string, number>>()
+  for (const schedule of preferredSchedules) {
+    for (const assignment of schedule) {
+      const groupWeek = `${assignment.group}:${assignment.week}`
+      const signature = `${assignment.category}\u0000${assignment.area}\u0000${assignment.shift}`
+      const counts = preferenceCounts.get(groupWeek) ?? new Map<string, number>()
+      counts.set(signature, (counts.get(signature) ?? 0) + 1)
+      preferenceCounts.set(groupWeek, counts)
+    }
+  }
+
+  return assignments.reduce((score, assignment) => {
+    const groupWeek = `${assignment.group}:${assignment.week}`
+    const signature = `${assignment.category}\u0000${assignment.area}\u0000${assignment.shift}`
+    return score + (preferenceCounts.get(groupWeek)?.get(signature) ?? 0)
+  }, 0)
+}
+
 export const defaultCategories: RotationCategory[] = [
   { name: 'OR DIDACTICS', areas: [{ name: 'OR DIDACTICS', capacity: 1, allowNoc: true }] },
   { name: 'ORUBAY / OB-OR', areas: [{ name: 'ORUBAY', capacity: 1, allowNoc: true }, { name: 'OB-OR', capacity: 1, allowNoc: true }] },

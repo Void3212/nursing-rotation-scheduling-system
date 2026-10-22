@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { createClient } from '@/lib/supabase/client'
-import { createAssignments, defaultCategories, getGroups, shifts, validateAssignments, type Assignment, type RotationCategory } from '@/lib/scheduler'
+import { createAssignments, defaultCategories, getGroups, isScheduleWarning, scorePreferredAssignments, shifts, validateAssignments, type Assignment, type RotationCategory } from '@/lib/scheduler'
 import { isSupabaseConfigured, readLocalSchedules, writeLocalSchedules, type SavedSchedule } from '@/lib/schedule-storage'
 import './features.css'
 import {
@@ -73,6 +73,8 @@ export default function Page() {
   const [selectedWeek, setSelectedWeek] = useState(0)
   const [showExcelPreview, setShowExcelPreview] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
+  const [cloudScheduleStatus, setCloudScheduleStatus] = useState('')
+  const [preferenceStatus, setPreferenceStatus] = useState('')
   const [isFixingSchedule, setIsFixingSchedule] = useState(false)
   const [fixStatus, setFixStatus] = useState('')
 
@@ -118,7 +120,12 @@ export default function Page() {
   useEffect(() => {
     if (!cloudUserEmail) return
     const supabase = createClient()
-    void supabase.from('rotation_schedules').select('*').order('created_at', { ascending: false }).then(({ data }) => {
+    void supabase.from('rotation_schedules').select('*').order('created_at', { ascending: false }).then(({ data, error }) => {
+      if (error) {
+        setCloudScheduleStatus(`Cloud schedule load failed: ${error.message}`)
+        return
+      }
+      setCloudScheduleStatus('')
       if (!data?.length) return
       const remoteSchedules = data.map((row) => ({
         id: row.id,
@@ -130,6 +137,7 @@ export default function Page() {
         categories: row.categories as RotationCategory[],
         assignments: row.assignments as Assignment[],
         validationErrors: row.validation_errors as string[],
+        preferred: row.preferred === true,
       })) satisfies SavedSchedule[]
       setSavedSchedules((current) => [...remoteSchedules, ...current.filter((item) => !remoteSchedules.some((remote) => remote.id === item.id))])
     })
@@ -137,10 +145,41 @@ export default function Page() {
 
 
   function generate() {
-    const nextAssignments = createAssignments(groupCount, weekCount, categories, allowSpecialRepeats)
+    const preferredSchedules = savedSchedules.filter((schedule) =>
+      schedule.preferred
+      && schedule.validationErrors.every(isScheduleWarning)
+      && schedule.groupCount === groupCount
+      && schedule.weekCount === weekCount
+      && schedule.allowSpecialRepeats === allowSpecialRepeats
+      && JSON.stringify(schedule.categories) === JSON.stringify(categories),
+    )
+    let nextAssignments = createAssignments(groupCount, weekCount, categories, allowSpecialRepeats)
+    let nextErrors = validateAssignments(nextAssignments, groupCount, weekCount, categories, allowSpecialRepeats)
+    let nextRuleErrorCount = nextErrors.filter((error) => !isScheduleWarning(error)).length
+    let bestPreferenceScore = scorePreferredAssignments(nextAssignments, preferredSchedules.map((schedule) => schedule.assignments))
+
+    for (let attempt = 1; attempt < (preferredSchedules.length ? 25 : 1); attempt += 1) {
+      const candidate = createAssignments(groupCount, weekCount, categories, allowSpecialRepeats)
+      const candidateErrors = validateAssignments(candidate, groupCount, weekCount, categories, allowSpecialRepeats)
+      const candidateRuleErrorCount = candidateErrors.filter((error) => !isScheduleWarning(error)).length
+      const candidatePreferenceScore = scorePreferredAssignments(candidate, preferredSchedules.map((schedule) => schedule.assignments))
+      if (candidateRuleErrorCount < nextRuleErrorCount
+        || (candidateRuleErrorCount === nextRuleErrorCount && candidatePreferenceScore > bestPreferenceScore)
+        || (candidateRuleErrorCount === nextRuleErrorCount && candidatePreferenceScore === bestPreferenceScore && candidate.length > nextAssignments.length)) {
+        nextAssignments = candidate
+        nextErrors = candidateErrors
+        nextRuleErrorCount = candidateRuleErrorCount
+        bestPreferenceScore = candidatePreferenceScore
+      }
+    }
+
     setAssignments(nextAssignments)
-    setValidationErrors(validateAssignments(nextAssignments, groupCount, weekCount, categories, allowSpecialRepeats))
+    setValidationErrors(nextErrors)
     setFixStatus('')
+    setPreferenceStatus(preferredSchedules.length
+      ? `Generated using ${preferredSchedules.length} preferred schedule${preferredSchedules.length === 1 ? '' : 's'} as guidance.`
+      : '',
+    )
     setIsGenerated(true)
     setSelectedWeek(0)
     setSearch('')
@@ -206,7 +245,7 @@ export default function Page() {
     const schedule: SavedSchedule = {
       id: crypto.randomUUID(), name: `Clinical rotation schedule · ${new Date().toLocaleDateString()}`,
       createdAt: new Date().toISOString(), groupCount, weekCount, allowSpecialRepeats,
-      categories, assignments, validationErrors,
+      categories, assignments, validationErrors, preferred: false,
     }
     setSavedSchedules((current) => [schedule, ...current])
     if (!isSupabaseConfigured()) {
@@ -222,6 +261,7 @@ export default function Page() {
       categories,
       assignments,
       validation_errors: validationErrors,
+      preferred: false,
     }).select('id').single()
     if (error) {
       setSaveStatus(`Saved on this device; cloud save failed: ${error.message}`)
@@ -285,6 +325,24 @@ export default function Page() {
     if (isSupabaseConfigured()) void createClient().from('rotation_schedules').delete().eq('id', schedule.id)
   }
 
+  function togglePreferredSchedule(schedule: SavedSchedule) {
+    const preferred = !schedule.preferred
+    setSavedSchedules((current) => current.map((item) => item.id === schedule.id ? { ...item, preferred } : item))
+    if (!isSupabaseConfigured() || !cloudUserEmail) {
+      setPreferenceStatus(preferred ? 'Marked as preferred on this device.' : 'Removed preference on this device.')
+      return
+    }
+
+    void createClient().from('rotation_schedules').update({ preferred }).eq('id', schedule.id).select('id').maybeSingle().then(({ data, error }) => {
+      setPreferenceStatus(error
+        ? `Preference saved on this device; cloud update failed: ${error.message}`
+        : !data
+          ? 'Preference saved on this device; this schedule is not currently in cloud storage.'
+          : preferred ? 'Preferred schedule synced to Supabase.' : 'Preference update synced to Supabase.',
+      )
+    })
+  }
+
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNavOpen ? 'mobile-open' : ''}`}>
       <div className="brand"><div className="brand-mark"><Stethoscope /></div><div><strong>SchedMom</strong><span>Rotation Planner</span></div></div>
@@ -305,9 +363,9 @@ export default function Page() {
           <div className="bottom-grid"><section className="card recent-card"><div className="card-header"><div><h2>Recent schedules</h2><p>Saved schedule versions</p></div><button className="text-button" onClick={() => setActive('Saved Schedules')}>View all <ArrowRight /></button></div><div className="schedule-list"><div className="schedule-row"><div className="file-icon"><FileText /></div><div><strong>Fall 2024 Clinical Rotations</strong><span>Updated today at 9:42 AM · 30 groups</span></div><span className="status-pill ready">Ready</span><MoreHorizontal /></div><div className="schedule-row"><div className="file-icon"><FileText /></div><div><strong>Summer 2024 Rotation Plan</strong><span>Updated Jun 28 · 24 groups</span></div><span className="status-pill archived">Archived</span><MoreHorizontal /></div></div></section><section className="card suggestions-card"><div className="card-header"><div><h2>Suggested fixes</h2><p>Based on your latest validation</p></div><span className="count-badge">3</span></div><div className="suggestion"><div className="suggestion-icon orange"><AlertTriangle /></div><div><strong>Review Category 1 + 2</strong><p>Repetition rule may affect 4 groups</p></div><button><ArrowRight /></button></div><div className="suggestion"><div className="suggestion-icon blue"><RefreshCw /></div><div><strong>Rebalance Week 4</strong><p>Move G17 to an open PM slot</p></div><button><ArrowRight /></button></div></section></div>
         </>}
 
-        {active === 'Schedule' && <ScheduleWorkspace weekCount={weekCount} groupCount={groupCount} categories={categories} validationErrors={validationErrors} assignments={assignments} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} search={search} setSearch={setSearch} generate={generate} fixSchedule={fixSchedule} isFixingSchedule={isFixingSchedule} fixStatus={fixStatus} saveSchedule={saveSchedule} saveStatus={saveStatus} isGenerated={isGenerated} showExcelPreview={showExcelPreview} setShowExcelPreview={setShowExcelPreview} updateAssignment={updateAssignment} />}
+        {active === 'Schedule' && <>{preferenceStatus && <p className="save-status" role="status">{preferenceStatus}</p>}<ScheduleWorkspace weekCount={weekCount} groupCount={groupCount} categories={categories} validationErrors={validationErrors} assignments={assignments} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} search={search} setSearch={setSearch} generate={generate} fixSchedule={fixSchedule} isFixingSchedule={isFixingSchedule} fixStatus={fixStatus} saveSchedule={saveSchedule} saveStatus={saveStatus} isGenerated={isGenerated} showExcelPreview={showExcelPreview} setShowExcelPreview={setShowExcelPreview} updateAssignment={updateAssignment} /></>}
         {active === 'Schedule Setup' && <><SetupWorkspace groupCount={groupCount} setGroupCount={changeGroupCount} weekCount={weekCount} setWeekCount={changeWeekCount} resetConfiguration={restoreDefaults} generate={generate} allowSpecialRepeats={allowSpecialRepeats} setAllowSpecialRepeats={changeRepeatRule} /><CategoryEditor categories={categories} setCategories={changeCategories} /></>}
-        {active === 'Saved Schedules' && <SavedSchedulesView schedules={savedSchedules} loadSchedule={loadSchedule} removeSchedule={removeSchedule} />}
+        {active === 'Saved Schedules' && <SavedSchedulesView schedules={savedSchedules} loadSchedule={loadSchedule} removeSchedule={removeSchedule} togglePreferredSchedule={togglePreferredSchedule} cloudStatus={cloudScheduleStatus} preferenceStatus={preferenceStatus} />}
         {['Validation', 'Group Tracking', 'Category Tracking', 'Weekly Tracking', 'Suggestions', 'Settings', 'Generate Schedule'].includes(active) && <PlaceholderView active={active} generate={generate} assignments={assignments} groupCount={groupCount} weekCount={weekCount} categories={categories} validationErrors={validationErrors} cloudEnabled={isSupabaseConfigured()} cloudUserEmail={cloudUserEmail} authEmail={authEmail} setAuthEmail={setAuthEmail} authStatus={authStatus} sendSignInLink={sendSignInLink} signOut={signOut} onNavigate={setActive} />}
       </div>
     </main>
@@ -359,8 +417,8 @@ function CategoryEditor({ categories, setCategories }: { categories: RotationCat
   return <section className="card category-editor"><div className="card-header"><div><h2>Categories and areas</h2><p>Set per-shift capacity, NOC eligibility, and whether an area must be scheduled every week. If another rule prevents coverage, validation will identify the missing week.</p></div><Button variant="outline" onClick={() => setCategories([...categories, { name: `New category ${categories.length + 1}`, areas: [{ name: `New area ${categories.length + 1}`, capacity: 1, allowNoc: true, requiredEachWeek: false }] }])}><Plus data-icon="inline-start" /> Add category</Button></div><div className="category-editor-list">{categories.map((category, categoryIndex) => <div className={`category-editor-row category-tone-${categoryIndex % 7}`} key={categoryIndex}><label>Category<input value={category.name} onChange={(event) => updateCategory(categoryIndex, event.target.value)} /></label><div className="area-editor-list">{category.areas.map((area, areaIndex) => <div className="area-editor" key={areaIndex}><input aria-label="Area name" value={area.name} onChange={(event) => updateArea(categoryIndex, areaIndex, 'name', event.target.value)} /><label>Maximum groups / shift<input aria-label={`Maximum groups per shift for ${area.name}`} type="number" min="1" max="100" step="1" value={area.capacity || ''} onChange={(event) => updateArea(categoryIndex, areaIndex, 'capacity', event.target.value)} /></label><label className="area-rule-toggle"><input type="checkbox" checked={area.allowNoc !== false} onChange={(event) => updateAreaRule(categoryIndex, areaIndex, 'allowNoc', event.target.checked)} /><span>Allow NOC</span></label><label className="area-rule-toggle"><input type="checkbox" checked={area.requiredEachWeek === true} onChange={(event) => updateAreaRule(categoryIndex, areaIndex, 'requiredEachWeek', event.target.checked)} /><span>Required every week</span></label><button className="icon-button" title="Remove area" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: item.areas.filter((_, itemIndex) => itemIndex !== areaIndex) } : item))}><X /></button></div>)}</div><div className="category-editor-actions"><Button variant="ghost" size="sm" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: [...item.areas, { name: 'New area', capacity: 1, allowNoc: true, requiredEachWeek: false }] } : item))}><Plus data-icon="inline-start" /> Add area</Button><Button variant="ghost" size="sm" onClick={() => setCategories(categories.filter((_, index) => index !== categoryIndex))}><X data-icon="inline-start" /> Remove category</Button></div></div>)}</div></section>
 }
 
-function SavedSchedulesView({ schedules, loadSchedule, removeSchedule }: { schedules: SavedSchedule[]; loadSchedule: (schedule: SavedSchedule) => void; removeSchedule: (schedule: SavedSchedule) => void }) {
-  return <><div className="page-heading"><div><p className="eyebrow accent">SCHEDULE LIBRARY</p><h1>Saved schedules</h1><p className="subheading">Restore a schedule or remove an outdated version.</p></div></div><section className="card tracking-card"><div className="tracking-table-wrap"><table className="tracking-table"><thead><tr><th>Name</th><th>Saved</th><th>Groups</th><th>Weeks</th><th>Issues</th><th>Actions</th></tr></thead><tbody>{schedules.map((schedule) => <tr key={schedule.id}><td><strong>{schedule.name}</strong></td><td>{new Date(schedule.createdAt).toLocaleString()}</td><td>{schedule.groupCount}</td><td>{schedule.weekCount}</td><td>{schedule.validationErrors.length}</td><td><Button size="sm" onClick={() => loadSchedule(schedule)}>Open</Button><Button variant="ghost" size="sm" onClick={() => removeSchedule(schedule)}>Delete</Button></td></tr>)}</tbody></table>{schedules.length === 0 && <p className="tracking-empty">No saved schedules yet. Generate and save a schedule to see it here.</p>}</div></section></>
+function SavedSchedulesView({ schedules, loadSchedule, removeSchedule, togglePreferredSchedule, cloudStatus, preferenceStatus }: { schedules: SavedSchedule[]; loadSchedule: (schedule: SavedSchedule) => void; removeSchedule: (schedule: SavedSchedule) => void; togglePreferredSchedule: (schedule: SavedSchedule) => void; cloudStatus: string; preferenceStatus: string }) {
+  return <><div className="page-heading"><div><p className="eyebrow accent">SCHEDULE LIBRARY</p><h1>Saved schedules</h1><p className="subheading">Schedules are not preferred automatically. Mark one to guide future generations. Coverage gaps are shown as watch-outs and do not prevent a preference.</p></div></div>{cloudStatus && <p className="save-status" role="status">{cloudStatus}</p>}{preferenceStatus && <p className="save-status" role="status">{preferenceStatus}</p>}<section className="card tracking-card"><div className="tracking-table-wrap"><table className="tracking-table"><thead><tr><th>Name</th><th>Saved</th><th>Groups</th><th>Weeks</th><th>Watch-outs</th><th>Rule errors</th><th>Preference</th><th>Actions</th></tr></thead><tbody>{schedules.map((schedule) => { const watchOutCount = schedule.validationErrors.filter(isScheduleWarning).length; const ruleErrorCount = schedule.validationErrors.length - watchOutCount; return <tr key={schedule.id}><td><strong>{schedule.name}</strong></td><td>{new Date(schedule.createdAt).toLocaleString()}</td><td>{schedule.groupCount}</td><td>{schedule.weekCount}</td><td>{watchOutCount}</td><td>{ruleErrorCount}</td><td><Button variant={schedule.preferred ? 'secondary' : 'outline'} size="sm" aria-pressed={schedule.preferred === true} disabled={ruleErrorCount > 0} title={ruleErrorCount ? 'Resolve rule errors before using this schedule as a preferred example.' : undefined} onClick={() => togglePreferredSchedule(schedule)}>{schedule.preferred ? 'Remove preference' : 'Mark preferred'}</Button></td><td><Button size="sm" onClick={() => loadSchedule(schedule)}>Open</Button><Button variant="ghost" size="sm" onClick={() => removeSchedule(schedule)}>Delete</Button></td></tr> })}</tbody></table>{schedules.length === 0 && <p className="tracking-empty">No saved schedules yet. Generate and save a schedule to see it here.</p>}</div></section></>
 }
 
 function PlaceholderView({ active, generate, assignments, groupCount, weekCount, categories, validationErrors, cloudEnabled, cloudUserEmail, authEmail, setAuthEmail, authStatus, sendSignInLink, signOut, onNavigate }: { active: string; generate: () => void; assignments: Assignment[]; groupCount: number; weekCount: number; categories: RotationCategory[]; validationErrors: string[]; cloudEnabled: boolean; cloudUserEmail: string; authEmail: string; setAuthEmail: (email: string) => void; authStatus: string; sendSignInLink: () => Promise<void>; signOut: () => Promise<void>; onNavigate: (page: string) => void }) {
@@ -368,9 +426,13 @@ function PlaceholderView({ active, generate, assignments, groupCount, weekCount,
   const generated = assignments.length > 0
   const groupProgress = groups.map((group) => ({ group, completed: new Set(assignments.filter((assignment) => assignment.group === group).map((assignment) => assignment.category)) }))
 
-  if (active === 'Generate Schedule') return <><div className="page-heading"><div><p className="eyebrow accent">CONSTRAINT ENGINE</p><h1>Generate schedule</h1><p className="subheading">Create assignments from your configured group, week, area and repetition rules.</p></div><Button onClick={generate}><Sparkles data-icon="inline-start" /> Generate schedule</Button></div><section className="card report-card"><h2>Generation inputs</h2><p>{groupCount} groups · {weekCount} weeks · {categories.length} categories · {categories.reduce((total, category) => total + category.areas.length, 0)} areas · AM / PM / NOC</p><p>{generated ? `${assignments.length} assignments generated; ${validationErrors.length} validation issues.` : 'No schedule has been generated for this configuration yet.'}</p></section></>
+  if (active === 'Generate Schedule') return <><div className="page-heading"><div><p className="eyebrow accent">CONSTRAINT ENGINE</p><h1>Generate schedule</h1><p className="subheading">Create assignments from your configured group, week, area and repetition rules.</p></div><Button onClick={generate}><Sparkles data-icon="inline-start" /> Generate schedule</Button></div><section className="card report-card"><h2>Generation inputs</h2><p>{groupCount} groups · {weekCount} weeks · {categories.length} categories · {categories.reduce((total, category) => total + category.areas.length, 0)} areas · AM / PM / NOC</p><p>{generated ? `${assignments.length} assignments generated; ${validationErrors.filter((error) => !isScheduleWarning(error)).length} rule errors and ${validationErrors.filter(isScheduleWarning).length} watch-outs.` : 'No schedule has been generated for this configuration yet.'}</p></section></>
 
-  if (active === 'Validation') return <><div className="page-heading"><div><p className="eyebrow accent">QUALITY CHECKS</p><h1>Validation report</h1><p className="subheading">Checks coverage, category completion, repetition rules and per-shift capacity.</p></div>{!generated && <Button onClick={generate}><Sparkles data-icon="inline-start" /> Generate schedule</Button>}</div><section className="card report-card"><div className="report-summary"><strong>{generated ? `${validationErrors.length} issues found` : 'No schedule to validate'}</strong><span>{generated ? `${assignments.length} assignments checked` : 'Generate a schedule to run the checks.'}</span></div>{validationErrors.length ? <ul className="issue-list">{validationErrors.map((error) => <li key={error}><AlertTriangle />{error}</li>)}</ul> : generated ? <p className="success-message"><Check /> All configured scheduling constraints pass.</p> : null}</section></>
+  if (active === 'Validation') {
+    const watchOuts = validationErrors.filter(isScheduleWarning)
+    const ruleErrors = validationErrors.filter((error) => !isScheduleWarning(error))
+    return <><div className="page-heading"><div><p className="eyebrow accent">QUALITY CHECKS</p><h1>Schedule review</h1><p className="subheading">Rule errors identify constraints to fix. Watch-outs highlight coverage gaps to review.</p></div>{!generated && <Button onClick={generate}><Sparkles data-icon="inline-start" /> Generate schedule</Button>}</div><section className="card report-card"><div className="report-summary"><strong>{generated ? `${ruleErrors.length} rule errors · ${watchOuts.length} watch-outs` : 'No schedule to review'}</strong><span>{generated ? `${assignments.length} assignments checked` : 'Generate a schedule to run the checks.'}</span></div>{ruleErrors.length > 0 && <><h2>Rule errors</h2><ul className="issue-list">{ruleErrors.map((error) => <li key={error}><AlertTriangle />{error}</li>)}</ul></>}{watchOuts.length > 0 && <><h2>Things to watch out for</h2><ul className="issue-list">{watchOuts.map((warning) => <li key={warning}><AlertTriangle />{warning}</li>)}</ul></>}{generated && !validationErrors.length && <p className="success-message"><Check /> All configured scheduling constraints pass.</p>}</section></>
+  }
 
   if (active === 'Group Tracking') return <><div className="page-heading"><div><p className="eyebrow accent">COMPLETION MATRIX</p><h1>Group tracking</h1><p className="subheading">Track each group’s completed clinical categories.</p></div></div><section className="card tracking-card"><div className="tracking-table-wrap"><table className="tracking-table"><thead><tr><th>Group</th>{categories.map((category) => <th key={category.name}>{category.name}</th>)}<th>Progress</th></tr></thead><tbody>{groupProgress.map(({ group, completed }) => <tr key={group}><th>{group}</th>{categories.map((category) => <td key={category.name}>{completed.has(category.name) ? <Check className="table-check" /> : '—'}</td>)}<td>{completed.size} / {categories.length}</td></tr>)}</tbody></table></div>{!generated && <p className="tracking-empty">Generate a schedule to populate group tracking.</p>}</section></>
 
@@ -397,6 +459,8 @@ function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors
   const areas = categories.flatMap((category, categoryIndex) => category.areas.map((area) => ({ ...area, category: category.name, categoryIndex })))
   const visibleAreas = areas.filter((area) => matchingAssignments.some((assignment) => assignment.area === area.name && assignment.category === area.category))
   const visibleSlots = visibleAreas.flatMap((area) => Array.from({ length: area.capacity }, (_, slotIndex) => ({ ...area, slotIndex })))
+  const watchOuts = validationErrors.filter(isScheduleWarning)
+  const ruleErrors = validationErrors.filter((error) => !isScheduleWarning(error))
 
   function getSlotAssignments(area: typeof areas[number], shift: string, slotIndex: number, sourceAssignments: Assignment[]) {
     const assignmentsByWeek = new Map<number, Assignment[]>()
@@ -440,12 +504,12 @@ function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors
   }
 
   return <>
-    <div className="page-heading"><div><p className="eyebrow accent">LIVE WORKSPACE</p><h1>Clinical rotation schedule</h1><p className="subheading">{isGenerated ? `${assignments.length} assignments · ${validationErrors.length} validation issues` : 'Generate a schedule from your configured rotations.'}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => setShowExcelPreview(!showExcelPreview)}><Grid3X3 data-icon="inline-start" /> {showExcelPreview ? 'Hide matrix' : 'Excel preview'}</Button><Button variant="outline" onClick={exportCsv} disabled={!assignments.length}><Download data-icon="inline-start" /> Export CSV</Button><Button variant="outline" onClick={saveSchedule} disabled={!isGenerated || saveStatus === 'Saving…'}><FileText data-icon="inline-start" /> Save schedule</Button><Button onClick={() => { if (window.confirm('Regenerate all assignments using the current setup?')) generate() }}><RefreshCw data-icon="inline-start" /> Regenerate</Button></div></div>
+    <div className="page-heading"><div><p className="eyebrow accent">LIVE WORKSPACE</p><h1>Clinical rotation schedule</h1><p className="subheading">{isGenerated ? `${assignments.length} assignments · ${ruleErrors.length} rule errors · ${watchOuts.length} watch-outs` : 'Generate a schedule from your configured rotations.'}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => setShowExcelPreview(!showExcelPreview)}><Grid3X3 data-icon="inline-start" /> {showExcelPreview ? 'Hide matrix' : 'Excel preview'}</Button><Button variant="outline" onClick={exportCsv} disabled={!assignments.length}><Download data-icon="inline-start" /> Export CSV</Button><Button variant="outline" onClick={saveSchedule} disabled={!isGenerated || saveStatus === 'Saving…'}><FileText data-icon="inline-start" /> Save schedule</Button><Button onClick={() => { if (window.confirm('Regenerate all assignments using the current setup?')) generate() }}><RefreshCw data-icon="inline-start" /> Regenerate</Button></div></div>
     {saveStatus && <p className="save-status" role="status">{saveStatus}</p>}
-    {isGenerated && validationErrors.length > 0 && <div className="fix-schedule-actions"><Button variant="outline" onClick={() => void fixSchedule()} disabled={isFixingSchedule}><Sparkles data-icon="inline-start" /> {isFixingSchedule ? 'Trying fixes…' : 'Fix schedule'}</Button><span>Try up to 25 alternative schedules using the current setup and keep the one with fewer validation issues.</span></div>}
+    {isGenerated && validationErrors.length > 0 && <div className="fix-schedule-actions"><Button variant="outline" onClick={() => void fixSchedule()} disabled={isFixingSchedule}><Sparkles data-icon="inline-start" /> {isFixingSchedule ? 'Trying fixes…' : 'Fix schedule'}</Button><span>Try up to 25 alternatives to reduce rule errors and coverage watch-outs.</span></div>}
     {fixStatus && <p className="fix-status" role="status">{fixStatus}</p>}
     <div className="schedule-toolbar"><div className="week-tabs"><button className={selectedWeek === 0 ? 'selected' : ''} onClick={() => setSelectedWeek(0)}>All weeks</button>{Array.from({ length: weekCount }, (_, index) => <button key={index} className={selectedWeek === index + 1 ? 'selected' : ''} onClick={() => setSelectedWeek(index + 1)}>Week {index + 1}</button>)}</div><div className="toolbar-actions"><div className="search-box"><Search /><input placeholder="Search groups, areas, or categories" value={search} onChange={(event) => setSearch(event.target.value)} /></div><select className="shift-filter" value={shiftFilter} onChange={(event) => setShiftFilter(event.target.value)} aria-label="Filter by shift"><option>All shifts</option>{shifts.map((shift) => <option key={shift}>{shift}</option>)}</select><select className="shift-filter" value={activeCategoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="Filter by category"><option>All categories</option>{categories.map((category) => <option key={category.name}>{category.name}</option>)}</select></div></div>
-    {!!validationErrors.length && <div className="validation-alert"><AlertTriangle /><div><strong>{validationErrors.length} validation issues</strong><ul>{validationErrors.slice(0, 5).map((error) => <li key={error}>{error}</li>)}</ul></div></div>}
+    {!!validationErrors.length && <div className="validation-alert"><AlertTriangle /><div>{ruleErrors.length > 0 && <><strong>{ruleErrors.length} rule errors</strong><ul>{ruleErrors.slice(0, 5).map((error) => <li key={error}>{error}</li>)}</ul></>}{watchOuts.length > 0 && <><strong>{watchOuts.length} things to watch out for</strong><ul>{watchOuts.slice(0, 5).map((warning) => <li key={warning}>{warning}</li>)}</ul></>}</div></div>}
     {showExcelPreview && <section className="excel-preview card"><div className="excel-preview-header"><div><p className="eyebrow accent">SPREADSHEET VIEW</p><h2>Clinical rotation workbook</h2><p>Assignments reflect the current generated schedule.</p></div><span className="excel-file-label"><FileText /> Clinical-Rotations.csv</span></div><div className="excel-sheet-wrap"><table className="excel-sheet matrix-sheet"><thead><tr><th>AREA</th>{Array.from({ length: weekCount }, (_, week) => <th key={week} colSpan={3}>Week {week + 1}</th>)}</tr><tr><th>Category</th>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => <th key={`${week}-${shift}`}>{shift}</th>))}</tr></thead><tbody>{areas.flatMap((area) => Array.from({ length: area.capacity }, (_, slotIndex) => <tr key={`${area.category}-${area.name}-${slotIndex}`} className={`category-tone-${area.categoryIndex % 7}`}><td>{area.name}{area.capacity > 1 && <small>Slot {slotIndex + 1}</small>}<small>{area.category}</small></td>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => { const assignment = assignments.filter((item) => item.category === area.category && item.area === area.name && item.week === week + 1 && item.shift === shift).sort((left, right) => left.group.localeCompare(right.group, undefined, { numeric: true }))[slotIndex]; return <td key={`${week}-${shift}`}>{assignment?.group ?? '—'}</td> }))}</tr>))}</tbody></table></div></section>}
     <div className="schedule-meta"><span><i className="dot teal-dot" /> {isGenerated ? 'Schedule generated' : 'No schedule generated'}</span><span>Showing {matchingAssignments.length} of {assignments.length} assignments</span><span className="meta-right">Capacity is measured per area, week and shift</span></div>
     <section className="card schedule-table-card"><div className="table-scroll"><table className="schedule-table"><thead><tr><th className="category-col">Category / Area</th><th>AM <small>Morning</small></th><th>PM <small>Afternoon</small></th><th>NOC <small>Night</small></th><th className="capacity-col">Slot / max</th></tr></thead><tbody>{visibleSlots.map((area) => <tr key={`${area.category}-${area.name}-${area.slotIndex}`} className={`category-tone-${area.categoryIndex % 7}`}><td><div className="area-name"><span className="category-marker" /><div><strong>{area.name}</strong>{area.capacity > 1 && <small>Slot {area.slotIndex + 1}</small>}<small>{area.category}</small></div></div></td>{shifts.map((shift) => { const rows = getSlotAssignments(area, shift, area.slotIndex, matchingAssignments); return <td key={shift}><div className="assignment-list">{rows.map((assignment) => <button className="group-chip editable-chip" key={`${assignment.group}-${assignment.week}`} title={`Move ${assignment.group} in Week ${assignment.week} to the next shift`} onClick={() => updateAssignment(assignment.group, assignment.week, 'shift', shifts[(shifts.indexOf(assignment.shift) + 1) % shifts.length])}>{assignment.group}{selectedWeek === 0 ? ` · W${assignment.week}` : ''}</button>)}{!rows.length && <span className="empty-slot">—</span>}</div></td>})}<td><span className="capacity-badge">{area.slotIndex + 1} / {area.capacity}</span></td></tr>)}</tbody></table>{visibleAreas.length === 0 && <p className="tracking-empty">{assignments.length ? 'No assignments match the selected week, filters, or search.' : 'Generate a schedule to view assignments.'}</p>}</div><div className="table-footer"><span><strong>{new Set(matchingAssignments.map((assignment) => assignment.group)).size}</strong> of {groupCount} groups assigned in this view</span><span><strong>{visibleAreas.length}</strong> clinical areas shown</span></div></section>
@@ -460,11 +524,13 @@ function DashboardView({ groupCount, weekCount, categories, assignments, validat
     const assigned = new Set(weekAssignments.map((assignment) => assignment.group)).size
     return { week: index + 1, assigned, missing: Math.max(0, groupCount - assigned) }
   })
-  const completed = assignments.length > 0 && validationErrors.length === 0
+  const watchOutCount = validationErrors.filter(isScheduleWarning).length
+  const ruleErrorCount = validationErrors.length - watchOutCount
+  const completed = assignments.length > 0 && ruleErrorCount === 0
 
   return <>
     <div className="page-heading"><div><p className="eyebrow accent">{today.toUpperCase()}</p><h1>Rotation overview</h1><p className="subheading">Live status from your current schedule and configuration.</p></div><div className="heading-actions"><Button variant="outline" onClick={() => onNavigate('Schedule Setup')}><Settings2 data-icon="inline-start" /> Configure</Button><Button onClick={generate}><Sparkles data-icon="inline-start" /> Generate schedule</Button></div></div>
-    <div className="stats-grid"><StatCard label="Student groups" value={String(groupCount)} detail="Configured groups" icon={Users} tone="teal" /><StatCard label="Categories" value={String(categories.length)} detail={`${areas} clinical areas`} icon={Hospital} tone="blue" /><StatCard label="Rotation weeks" value={String(weekCount)} detail="Configured period" icon={CalendarDays} tone="orange" /><StatCard label="Schedule status" value={assignments.length ? completed ? 'Valid' : 'Review' : 'Draft'} detail={assignments.length ? `${validationErrors.length} validation issues` : 'Awaiting generation'} icon={ClipboardCheck} tone="green" /></div>
+    <div className="stats-grid"><StatCard label="Student groups" value={String(groupCount)} detail="Configured groups" icon={Users} tone="teal" /><StatCard label="Categories" value={String(categories.length)} detail={`${areas} clinical areas`} icon={Hospital} tone="blue" /><StatCard label="Rotation weeks" value={String(weekCount)} detail="Configured period" icon={CalendarDays} tone="orange" /><StatCard label="Schedule status" value={assignments.length ? completed ? 'Rules pass' : 'Review rules' : 'Draft'} detail={assignments.length ? `${ruleErrorCount} rule errors · ${watchOutCount} watch-outs` : 'Awaiting generation'} icon={ClipboardCheck} tone="green" /></div>
     <div className="dashboard-grid"><section className="card schedule-overview"><div className="card-header"><div><h2>Weekly assignment coverage</h2><p>Assigned groups compared with the configured total</p></div><button className="text-button" onClick={() => onNavigate('Schedule')}>View schedule <ArrowRight /></button></div><div className="chart-area"><div className="y-axis"><span>{groupCount}</span><span>{Math.round(groupCount * .66)}</span><span>{Math.round(groupCount * .33)}</span><span>0</span></div><div className="bar-chart">{byWeek.map(({ week, assigned, missing }) => <div className="bar-column" key={week}><div className="bar-stack"><div className="bar teal" style={{ height: `${groupCount ? assigned / groupCount * 100 : 0}%` }} /><div className="bar pale" style={{ height: `${groupCount ? missing / groupCount * 100 : 0}%` }} /></div><span>W{week}</span></div>)}</div></div><div className="chart-legend"><span><i className="dot teal-dot" />Assigned</span><span><i className="dot pale-dot" />Unassigned</span></div></section><section className="card validation-card"><div className="card-header"><div><h2>Validation status</h2><p>Current schedule checks</p></div></div><div className="validation-score"><div className="score-ring"><span>{assignments.length ? Math.max(0, 100 - validationErrors.length) : 0}</span><small>%</small></div><div><strong>{!assignments.length ? 'Not generated' : completed ? 'All checks pass' : 'Review required'}</strong><p>{assignments.length ? `${validationErrors.length} findings` : 'Generate a schedule to validate.'}</p></div></div><div className="check-list">{(validationErrors.length ? validationErrors.slice(0, 4) : assignments.length ? ['All configured constraints pass.'] : ['Coverage checks', 'Area capacity checks', 'Category completion checks']).map((message) => <div className="check-row" key={message}><span className={`check ${validationErrors.length ? 'warning' : 'success'}`}>{validationErrors.length ? <AlertTriangle /> : <Check />}</span><span>{message}</span></div>)}</div><button className="full-button" onClick={openValidation}>Open validation report <ArrowRight /></button></section></div>
     <div className="bottom-grid"><section className="card recent-card"><div className="card-header"><div><h2>Recent schedules</h2><p>Saved on this device or synced to Supabase</p></div><button className="text-button" onClick={openSavedSchedules}>View all <ArrowRight /></button></div><div className="schedule-list">{savedSchedules.slice(0, 3).map((schedule) => <button className="schedule-row saved-row-button" key={schedule.id} onClick={() => loadSchedule(schedule)}><div className="file-icon"><FileText /></div><div><strong>{schedule.name}</strong><span>{new Date(schedule.createdAt).toLocaleString()} · {schedule.groupCount} groups</span></div><span className={`status-pill ${schedule.validationErrors.length ? 'archived' : 'ready'}`}>{schedule.validationErrors.length ? `${schedule.validationErrors.length} issues` : 'Valid'}</span></button>)}{!savedSchedules.length && <p className="tracking-empty">No saved schedules yet.</p>}</div></section><section className="card suggestions-card"><div className="card-header"><div><h2>Suggested fixes</h2><p>Current validation findings</p></div><span className="count-badge">{validationErrors.length}</span></div>{validationErrors.length ? validationErrors.slice(0, 3).map((error) => <div className="suggestion" key={error}><div className="suggestion-icon orange"><AlertTriangle /></div><div><strong>Resolve schedule issue</strong><p>{error}</p></div><button onClick={openValidation} aria-label="Open validation report"><ArrowRight /></button></div>) : <p className="suggestion-empty">{assignments.length ? 'No fixes needed.' : 'Generate a schedule to receive suggestions.'}</p>}</section></div>
   </>

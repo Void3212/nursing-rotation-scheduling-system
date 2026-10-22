@@ -8,6 +8,7 @@ create table if not exists public.rotation_schedules (
   categories jsonb not null default '[]'::jsonb,
   assignments jsonb not null default '[]'::jsonb,
   validation_errors jsonb not null default '[]'::jsonb,
+  preferred boolean not null default false,
   created_at timestamptz not null default now()
 );
 
