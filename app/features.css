@@ -29,8 +29,9 @@
 .category-editor-row > label, .area-editor label { display: grid; gap: 6px; color: #687d89; font-size: 10px; font-weight: 600; }
 .category-editor input { min-width: 0; border: 1px solid #d7e0e7; border-radius: 5px; padding: 8px 9px; color: #344d5c; font-size: 11px; }
 .area-editor-list { display: grid; gap: 7px; margin-top: 9px; }
-.area-editor { display: grid; grid-template-columns: minmax(140px, 1fr) 115px 32px; gap: 9px; align-items: end; }
-.area-editor .capacity-limit { display: flex; align-items: center; min-height: 32px; padding: 0 9px; border: 1px solid #d7e0e7; border-radius: 5px; background: #f6f9fa; color: #344d5c; font-size: 11px; font-weight: 400; }
+.area-editor { display: grid; grid-template-columns: minmax(140px, 1fr) 115px 100px 140px 32px; gap: 9px; align-items: end; }
+.area-editor .area-rule-toggle { display: flex; align-items: center; gap: 6px; min-height: 32px; white-space: nowrap; }
+.area-editor .area-rule-toggle input { width: 14px; height: 14px; margin: 0; padding: 0; accent-color: #438cac; }
 .area-editor .icon-button { min-height: 32px; }
 .category-editor-actions { display: flex; gap: 6px; margin-top: 7px; }
 .shift-filter { min-width: 115px; border: 1px solid var(--input); border-radius: 5px; padding: 0 8px; background: white; color: #58717f; font-size: 10px; }
@@ -42,6 +43,8 @@
 .excel-sheet.matrix-sheet td { white-space: normal; min-width: 54px; }
 .excel-sheet.matrix-sheet td:first-child { min-width: 150px; text-align: left; padding: 8px; }
 .save-status { display: block; margin: -18px 0 14px; color: #498d7c; font-size: 11px; }
+.fix-schedule-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; color: #738691; font-size: 11px; }
+.fix-status { margin: 0 0 12px; color: #498d7c; font-size: 11px; }
 .connection-label { color: #6c818d; font-size: 10px; }
 .saved-config-label { color: #83939d; font-size: 10px; }
 .auth-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -67,7 +70,7 @@
   .connection-label { font-size: 9px; }
   .category-editor .card-header { align-items: flex-start; flex-direction: column; }
   .category-progress { grid-template-columns: 1fr; gap: 8px; }
-  .area-editor { grid-template-columns: minmax(90px, 1fr) 100px 30px; gap: 6px; }
+  .area-editor { grid-template-columns: minmax(0, 1fr) 74px 74px minmax(112px, auto) 28px; gap: 4px; }
   .report-summary { flex-direction: column; }
   .shift-filter { min-height: 34px; }
   .schedule-list .schedule-row { flex-wrap: wrap; }

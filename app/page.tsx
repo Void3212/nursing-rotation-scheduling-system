@@ -73,6 +73,8 @@ export default function Page() {
   const [selectedWeek, setSelectedWeek] = useState(0)
   const [showExcelPreview, setShowExcelPreview] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
+  const [isFixingSchedule, setIsFixingSchedule] = useState(false)
+  const [fixStatus, setFixStatus] = useState('')
 
   useEffect(() => {
     const savedConfig = localStorage.getItem('clinica.schedule-config.v1')
@@ -138,6 +140,7 @@ export default function Page() {
     const nextAssignments = createAssignments(groupCount, weekCount, categories, allowSpecialRepeats)
     setAssignments(nextAssignments)
     setValidationErrors(validateAssignments(nextAssignments, groupCount, weekCount, categories, allowSpecialRepeats))
+    setFixStatus('')
     setIsGenerated(true)
     setSelectedWeek(0)
     setSearch('')
@@ -145,8 +148,35 @@ export default function Page() {
     setActive('Schedule')
   }
 
+  async function fixSchedule() {
+    if (!isGenerated || validationErrors.length === 0 || isFixingSchedule) return
+    setIsFixingSchedule(true)
+    setFixStatus('Trying alternative schedules against the current rules…')
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+
+    let bestAssignments = assignments
+    let bestErrors = validationErrors
+    for (let attempt = 0; attempt < 25 && bestErrors.length > 0; attempt += 1) {
+      const candidate = createAssignments(groupCount, weekCount, categories, allowSpecialRepeats)
+      const errors = validateAssignments(candidate, groupCount, weekCount, categories, allowSpecialRepeats)
+      if (errors.length < bestErrors.length || (errors.length === bestErrors.length && candidate.length > bestAssignments.length)) {
+        bestAssignments = candidate
+        bestErrors = errors
+      }
+    }
+
+    setAssignments(bestAssignments)
+    setValidationErrors(bestErrors)
+    setFixStatus(bestErrors.length === 0
+      ? 'All validation issues were resolved.'
+      : `Best schedule found after 25 attempts; ${bestErrors.length} validation issue${bestErrors.length === 1 ? '' : 's'} remain. Review the validation details below.`,
+    )
+    setIsFixingSchedule(false)
+  }
+
   function configurationChanged() {
     setIsGenerated(false)
+    setFixStatus('')
     if (assignments.length) setValidationErrors(['Configuration changed. Regenerate before saving or publishing this schedule.'])
   }
 
@@ -238,9 +268,16 @@ export default function Page() {
   }
 
   function updateAssignment(group: string, week: number, field: 'area' | 'shift', value: string) {
-    const nextAssignments = assignments.map((assignment) => assignment.group === group && assignment.week === week ? { ...assignment, [field]: value } : assignment)
+    let nextValue = value
+    if (field === 'shift' && value === 'NOC') {
+      const current = assignments.find((assignment) => assignment.group === group && assignment.week === week)
+      const area = categories.find((category) => category.name === current?.category)?.areas.find((item) => item.name === current?.area)
+      if (area?.allowNoc === false) nextValue = 'AM'
+    }
+    const nextAssignments = assignments.map((assignment) => assignment.group === group && assignment.week === week ? { ...assignment, [field]: nextValue } : assignment)
     setAssignments(nextAssignments)
     setValidationErrors(validateAssignments(nextAssignments, groupCount, weekCount, categories, allowSpecialRepeats))
+    setFixStatus('')
   }
 
   function removeSchedule(schedule: SavedSchedule) {
@@ -268,7 +305,7 @@ export default function Page() {
           <div className="bottom-grid"><section className="card recent-card"><div className="card-header"><div><h2>Recent schedules</h2><p>Saved schedule versions</p></div><button className="text-button" onClick={() => setActive('Saved Schedules')}>View all <ArrowRight /></button></div><div className="schedule-list"><div className="schedule-row"><div className="file-icon"><FileText /></div><div><strong>Fall 2024 Clinical Rotations</strong><span>Updated today at 9:42 AM · 30 groups</span></div><span className="status-pill ready">Ready</span><MoreHorizontal /></div><div className="schedule-row"><div className="file-icon"><FileText /></div><div><strong>Summer 2024 Rotation Plan</strong><span>Updated Jun 28 · 24 groups</span></div><span className="status-pill archived">Archived</span><MoreHorizontal /></div></div></section><section className="card suggestions-card"><div className="card-header"><div><h2>Suggested fixes</h2><p>Based on your latest validation</p></div><span className="count-badge">3</span></div><div className="suggestion"><div className="suggestion-icon orange"><AlertTriangle /></div><div><strong>Review Category 1 + 2</strong><p>Repetition rule may affect 4 groups</p></div><button><ArrowRight /></button></div><div className="suggestion"><div className="suggestion-icon blue"><RefreshCw /></div><div><strong>Rebalance Week 4</strong><p>Move G17 to an open PM slot</p></div><button><ArrowRight /></button></div></section></div>
         </>}
 
-        {active === 'Schedule' && <ScheduleWorkspace weekCount={weekCount} groupCount={groupCount} categories={categories} validationErrors={validationErrors} assignments={assignments} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} search={search} setSearch={setSearch} generate={generate} saveSchedule={saveSchedule} saveStatus={saveStatus} isGenerated={isGenerated} showExcelPreview={showExcelPreview} setShowExcelPreview={setShowExcelPreview} updateAssignment={updateAssignment} />}
+        {active === 'Schedule' && <ScheduleWorkspace weekCount={weekCount} groupCount={groupCount} categories={categories} validationErrors={validationErrors} assignments={assignments} selectedWeek={selectedWeek} setSelectedWeek={setSelectedWeek} search={search} setSearch={setSearch} generate={generate} fixSchedule={fixSchedule} isFixingSchedule={isFixingSchedule} fixStatus={fixStatus} saveSchedule={saveSchedule} saveStatus={saveStatus} isGenerated={isGenerated} showExcelPreview={showExcelPreview} setShowExcelPreview={setShowExcelPreview} updateAssignment={updateAssignment} />}
         {active === 'Schedule Setup' && <><SetupWorkspace groupCount={groupCount} setGroupCount={changeGroupCount} weekCount={weekCount} setWeekCount={changeWeekCount} resetConfiguration={restoreDefaults} generate={generate} allowSpecialRepeats={allowSpecialRepeats} setAllowSpecialRepeats={changeRepeatRule} /><CategoryEditor categories={categories} setCategories={changeCategories} /></>}
         {active === 'Saved Schedules' && <SavedSchedulesView schedules={savedSchedules} loadSchedule={loadSchedule} removeSchedule={removeSchedule} />}
         {['Validation', 'Group Tracking', 'Category Tracking', 'Weekly Tracking', 'Suggestions', 'Settings', 'Generate Schedule'].includes(active) && <PlaceholderView active={active} generate={generate} assignments={assignments} groupCount={groupCount} weekCount={weekCount} categories={categories} validationErrors={validationErrors} cloudEnabled={isSupabaseConfigured()} cloudUserEmail={cloudUserEmail} authEmail={authEmail} setAuthEmail={setAuthEmail} authStatus={authStatus} sendSignInLink={sendSignInLink} signOut={signOut} onNavigate={setActive} />}
@@ -300,13 +337,26 @@ function CategoryEditor({ categories, setCategories }: { categories: RotationCat
   }
 
   function updateArea(categoryIndex: number, areaIndex: number, field: 'name' | 'capacity', value: string) {
+    if (field === 'capacity' && value !== '' && !Number.isFinite(Number(value))) return
     setCategories(categories.map((category, index) => index === categoryIndex ? {
       ...category,
-      areas: category.areas.map((area, index) => index === areaIndex ? { ...area, [field]: field === 'capacity' ? Math.max(1, Number(value)) : value } : area),
+      areas: category.areas.map((area, index) => {
+        if (index !== areaIndex) return area
+        return field === 'capacity'
+          ? { ...area, capacity: value === '' ? 0 : Math.min(100, Math.max(1, Math.trunc(Number(value)))) }
+          : { ...area, name: value }
+      }),
     } : category))
   }
 
-  return <section className="card category-editor"><div className="card-header"><div><h2>Categories and areas</h2><p>Each AM, PM, and NOC shift can have only one group per area each week.</p></div><Button variant="outline" onClick={() => setCategories([...categories, { name: `New category ${categories.length + 1}`, areas: [{ name: `New area ${categories.length + 1}`, capacity: 1 }] }])}><Plus data-icon="inline-start" /> Add category</Button></div><div className="category-editor-list">{categories.map((category, categoryIndex) => <div className={`category-editor-row category-tone-${categoryIndex % 7}`} key={categoryIndex}><label>Category<input value={category.name} onChange={(event) => updateCategory(categoryIndex, event.target.value)} /></label><div className="area-editor-list">{category.areas.map((area, areaIndex) => <div className="area-editor" key={areaIndex}><input aria-label="Area name" value={area.name} onChange={(event) => updateArea(categoryIndex, areaIndex, 'name', event.target.value)} /><label>Maximum groups / shift<span className="capacity-limit">1 group</span></label><button className="icon-button" title="Remove area" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: item.areas.filter((_, itemIndex) => itemIndex !== areaIndex) } : item))}><X /></button></div>)}</div><div className="category-editor-actions"><Button variant="ghost" size="sm" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: [...item.areas, { name: 'New area', capacity: 1 }] } : item))}><Plus data-icon="inline-start" /> Add area</Button><Button variant="ghost" size="sm" onClick={() => setCategories(categories.filter((_, index) => index !== categoryIndex))}><X data-icon="inline-start" /> Remove category</Button></div></div>)}</div></section>
+  function updateAreaRule(categoryIndex: number, areaIndex: number, field: 'allowNoc' | 'requiredEachWeek', checked: boolean) {
+    setCategories(categories.map((category, index) => index === categoryIndex ? {
+      ...category,
+      areas: category.areas.map((area, index) => index === areaIndex ? { ...area, [field]: checked } : area),
+    } : category))
+  }
+
+  return <section className="card category-editor"><div className="card-header"><div><h2>Categories and areas</h2><p>Set per-shift capacity, NOC eligibility, and whether an area must be scheduled every week. If another rule prevents coverage, validation will identify the missing week.</p></div><Button variant="outline" onClick={() => setCategories([...categories, { name: `New category ${categories.length + 1}`, areas: [{ name: `New area ${categories.length + 1}`, capacity: 1, allowNoc: true, requiredEachWeek: false }] }])}><Plus data-icon="inline-start" /> Add category</Button></div><div className="category-editor-list">{categories.map((category, categoryIndex) => <div className={`category-editor-row category-tone-${categoryIndex % 7}`} key={categoryIndex}><label>Category<input value={category.name} onChange={(event) => updateCategory(categoryIndex, event.target.value)} /></label><div className="area-editor-list">{category.areas.map((area, areaIndex) => <div className="area-editor" key={areaIndex}><input aria-label="Area name" value={area.name} onChange={(event) => updateArea(categoryIndex, areaIndex, 'name', event.target.value)} /><label>Maximum groups / shift<input aria-label={`Maximum groups per shift for ${area.name}`} type="number" min="1" max="100" step="1" value={area.capacity || ''} onChange={(event) => updateArea(categoryIndex, areaIndex, 'capacity', event.target.value)} /></label><label className="area-rule-toggle"><input type="checkbox" checked={area.allowNoc !== false} onChange={(event) => updateAreaRule(categoryIndex, areaIndex, 'allowNoc', event.target.checked)} /><span>Allow NOC</span></label><label className="area-rule-toggle"><input type="checkbox" checked={area.requiredEachWeek === true} onChange={(event) => updateAreaRule(categoryIndex, areaIndex, 'requiredEachWeek', event.target.checked)} /><span>Required every week</span></label><button className="icon-button" title="Remove area" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: item.areas.filter((_, itemIndex) => itemIndex !== areaIndex) } : item))}><X /></button></div>)}</div><div className="category-editor-actions"><Button variant="ghost" size="sm" onClick={() => setCategories(categories.map((item, index) => index === categoryIndex ? { ...item, areas: [...item.areas, { name: 'New area', capacity: 1, allowNoc: true, requiredEachWeek: false }] } : item))}><Plus data-icon="inline-start" /> Add area</Button><Button variant="ghost" size="sm" onClick={() => setCategories(categories.filter((_, index) => index !== categoryIndex))}><X data-icon="inline-start" /> Remove category</Button></div></div>)}</div></section>
 }
 
 function SavedSchedulesView({ schedules, loadSchedule, removeSchedule }: { schedules: SavedSchedule[]; loadSchedule: (schedule: SavedSchedule) => void; removeSchedule: (schedule: SavedSchedule) => void }) {
@@ -333,7 +383,7 @@ function PlaceholderView({ active, generate, assignments, groupCount, weekCount,
   return <><div className="page-heading"><div><p className="eyebrow accent">WORKSPACE SETTINGS</p><h1>Settings</h1><p className="subheading">Current schedule configuration and persistence status.</p></div></div><section className="card report-card"><h2>Schedule defaults</h2><p>{groupCount} student groups · {weekCount} weeks · {categories.length} categories · {categories.reduce((total, category) => total + category.areas.length, 0)} areas</p><p>{cloudEnabled ? 'Schedules are saved on this device and can sync to the configured Supabase project.' : 'Schedules are saved on this device. Configure Supabase environment variables and apply the migration to enable cloud sync.'}</p></section>{cloudEnabled && <section className="card report-card auth-panel"><h2>Cloud account</h2>{cloudUserEmail ? <><p>Signed in as {cloudUserEmail}</p><Button variant="outline" onClick={() => void signOut()}>Sign out</Button></> : <><p>Sign in with a secure email link to sync schedules across devices.</p><div className="auth-form"><input type="email" autoComplete="email" placeholder="name@department.edu" value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} /><Button onClick={() => void sendSignInLink()}>Email sign-in link</Button></div></>}{authStatus && <p role="status">{authStatus}</p>}</section>}</>
 }
 
-function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors, assignments, selectedWeek, setSelectedWeek, search, setSearch, generate, saveSchedule, saveStatus, isGenerated, showExcelPreview, setShowExcelPreview, updateAssignment }: { weekCount: number; groupCount: number; categories: RotationCategory[]; validationErrors: string[]; assignments: Assignment[]; selectedWeek: number; setSelectedWeek: (week: number) => void; search: string; setSearch: (value: string) => void; generate: () => void; saveSchedule: () => Promise<void>; saveStatus: string; isGenerated: boolean; showExcelPreview: boolean; setShowExcelPreview: (value: boolean) => void; updateAssignment: (group: string, week: number, field: 'area' | 'shift', value: string) => void }) {
+function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors, assignments, selectedWeek, setSelectedWeek, search, setSearch, generate, fixSchedule, isFixingSchedule, fixStatus, saveSchedule, saveStatus, isGenerated, showExcelPreview, setShowExcelPreview, updateAssignment }: { weekCount: number; groupCount: number; categories: RotationCategory[]; validationErrors: string[]; assignments: Assignment[]; selectedWeek: number; setSelectedWeek: (week: number) => void; search: string; setSearch: (value: string) => void; generate: () => void; fixSchedule: () => Promise<void>; isFixingSchedule: boolean; fixStatus: string; saveSchedule: () => Promise<void>; saveStatus: string; isGenerated: boolean; showExcelPreview: boolean; setShowExcelPreview: (value: boolean) => void; updateAssignment: (group: string, week: number, field: 'area' | 'shift', value: string) => void }) {
   const [shiftFilter, setShiftFilter] = useState('All shifts')
   const [categoryFilter, setCategoryFilter] = useState('All categories')
   const activeCategoryFilter = categories.some((category) => category.name === categoryFilter) ? categoryFilter : 'All categories'
@@ -346,6 +396,22 @@ function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors
   )
   const areas = categories.flatMap((category, categoryIndex) => category.areas.map((area) => ({ ...area, category: category.name, categoryIndex })))
   const visibleAreas = areas.filter((area) => matchingAssignments.some((assignment) => assignment.area === area.name && assignment.category === area.category))
+  const visibleSlots = visibleAreas.flatMap((area) => Array.from({ length: area.capacity }, (_, slotIndex) => ({ ...area, slotIndex })))
+
+  function getSlotAssignments(area: typeof areas[number], shift: string, slotIndex: number, sourceAssignments: Assignment[]) {
+    const assignmentsByWeek = new Map<number, Assignment[]>()
+    sourceAssignments
+      .filter((assignment) => assignment.category === area.category && assignment.area === area.name && assignment.shift === shift)
+      .sort((left, right) => left.week - right.week || left.group.localeCompare(right.group, undefined, { numeric: true }))
+      .forEach((assignment) => {
+        const weekAssignments = assignmentsByWeek.get(assignment.week) ?? []
+        weekAssignments.push(assignment)
+        assignmentsByWeek.set(assignment.week, weekAssignments)
+      })
+    return [...assignmentsByWeek.values()]
+      .map((weekAssignments) => weekAssignments[slotIndex])
+      .filter((assignment): assignment is Assignment => assignment !== undefined)
+  }
 
   function exportCsv() {
     const escape = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`
@@ -354,15 +420,15 @@ function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors
     const rows = [
       ['AREA', ...weekHeaders],
       ['Category', ...shiftHeaders],
-      ...areas.map((area) => [
-        `${area.name}\n${area.category}`,
+      ...areas.flatMap((area) => Array.from({ length: area.capacity }, (_, slotIndex) => [
+        `${area.name}${area.capacity > 1 ? ` · Slot ${slotIndex + 1}` : ''}\n${area.category}`,
         ...Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => {
-          const groups = assignments
-            .filter((assignment) => assignment.category === area.category && assignment.area === area.name && assignment.week === week + 1 && assignment.shift === shift)
-            .map((assignment) => assignment.group)
-          return groups.join(', ') || '—'
+          const assignment = assignments
+            .filter((item) => item.category === area.category && item.area === area.name && item.week === week + 1 && item.shift === shift)
+            .sort((left, right) => left.group.localeCompare(right.group, undefined, { numeric: true }))[slotIndex]
+          return assignment?.group ?? '—'
         })).flat(),
-      ]),
+      ])),
     ]
     const content = rows.map((row) => row.map(escape).join(',')).join('\r\n')
     const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }))
@@ -376,11 +442,13 @@ function ScheduleWorkspace({ weekCount, groupCount, categories, validationErrors
   return <>
     <div className="page-heading"><div><p className="eyebrow accent">LIVE WORKSPACE</p><h1>Clinical rotation schedule</h1><p className="subheading">{isGenerated ? `${assignments.length} assignments · ${validationErrors.length} validation issues` : 'Generate a schedule from your configured rotations.'}</p></div><div className="heading-actions"><Button variant="outline" onClick={() => setShowExcelPreview(!showExcelPreview)}><Grid3X3 data-icon="inline-start" /> {showExcelPreview ? 'Hide matrix' : 'Excel preview'}</Button><Button variant="outline" onClick={exportCsv} disabled={!assignments.length}><Download data-icon="inline-start" /> Export CSV</Button><Button variant="outline" onClick={saveSchedule} disabled={!isGenerated || saveStatus === 'Saving…'}><FileText data-icon="inline-start" /> Save schedule</Button><Button onClick={() => { if (window.confirm('Regenerate all assignments using the current setup?')) generate() }}><RefreshCw data-icon="inline-start" /> Regenerate</Button></div></div>
     {saveStatus && <p className="save-status" role="status">{saveStatus}</p>}
+    {isGenerated && validationErrors.length > 0 && <div className="fix-schedule-actions"><Button variant="outline" onClick={() => void fixSchedule()} disabled={isFixingSchedule}><Sparkles data-icon="inline-start" /> {isFixingSchedule ? 'Trying fixes…' : 'Fix schedule'}</Button><span>Try up to 25 alternative schedules using the current setup and keep the one with fewer validation issues.</span></div>}
+    {fixStatus && <p className="fix-status" role="status">{fixStatus}</p>}
     <div className="schedule-toolbar"><div className="week-tabs"><button className={selectedWeek === 0 ? 'selected' : ''} onClick={() => setSelectedWeek(0)}>All weeks</button>{Array.from({ length: weekCount }, (_, index) => <button key={index} className={selectedWeek === index + 1 ? 'selected' : ''} onClick={() => setSelectedWeek(index + 1)}>Week {index + 1}</button>)}</div><div className="toolbar-actions"><div className="search-box"><Search /><input placeholder="Search groups, areas, or categories" value={search} onChange={(event) => setSearch(event.target.value)} /></div><select className="shift-filter" value={shiftFilter} onChange={(event) => setShiftFilter(event.target.value)} aria-label="Filter by shift"><option>All shifts</option>{shifts.map((shift) => <option key={shift}>{shift}</option>)}</select><select className="shift-filter" value={activeCategoryFilter} onChange={(event) => setCategoryFilter(event.target.value)} aria-label="Filter by category"><option>All categories</option>{categories.map((category) => <option key={category.name}>{category.name}</option>)}</select></div></div>
     {!!validationErrors.length && <div className="validation-alert"><AlertTriangle /><div><strong>{validationErrors.length} validation issues</strong><ul>{validationErrors.slice(0, 5).map((error) => <li key={error}>{error}</li>)}</ul></div></div>}
-    {showExcelPreview && <section className="excel-preview card"><div className="excel-preview-header"><div><p className="eyebrow accent">SPREADSHEET VIEW</p><h2>Clinical rotation workbook</h2><p>Assignments reflect the current generated schedule.</p></div><span className="excel-file-label"><FileText /> Clinical-Rotations.csv</span></div><div className="excel-sheet-wrap"><table className="excel-sheet matrix-sheet"><thead><tr><th>AREA</th>{Array.from({ length: weekCount }, (_, week) => <th key={week} colSpan={3}>Week {week + 1}</th>)}</tr><tr><th>Category</th>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => <th key={`${week}-${shift}`}>{shift}</th>))}</tr></thead><tbody>{areas.map((area) => <tr key={area.name} className={`category-tone-${area.categoryIndex % 7}`}><td>{area.name}<small>{area.category}</small></td>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => { const names = assignments.filter((assignment) => assignment.category === area.category && assignment.area === area.name && assignment.week === week + 1 && assignment.shift === shift).map((assignment) => assignment.group); return <td key={`${week}-${shift}`}>{names.join(', ') || '—'}</td> }))}</tr>)}</tbody></table></div></section>}
+    {showExcelPreview && <section className="excel-preview card"><div className="excel-preview-header"><div><p className="eyebrow accent">SPREADSHEET VIEW</p><h2>Clinical rotation workbook</h2><p>Assignments reflect the current generated schedule.</p></div><span className="excel-file-label"><FileText /> Clinical-Rotations.csv</span></div><div className="excel-sheet-wrap"><table className="excel-sheet matrix-sheet"><thead><tr><th>AREA</th>{Array.from({ length: weekCount }, (_, week) => <th key={week} colSpan={3}>Week {week + 1}</th>)}</tr><tr><th>Category</th>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => <th key={`${week}-${shift}`}>{shift}</th>))}</tr></thead><tbody>{areas.flatMap((area) => Array.from({ length: area.capacity }, (_, slotIndex) => <tr key={`${area.category}-${area.name}-${slotIndex}`} className={`category-tone-${area.categoryIndex % 7}`}><td>{area.name}{area.capacity > 1 && <small>Slot {slotIndex + 1}</small>}<small>{area.category}</small></td>{Array.from({ length: weekCount }, (_, week) => shifts.map((shift) => { const assignment = assignments.filter((item) => item.category === area.category && item.area === area.name && item.week === week + 1 && item.shift === shift).sort((left, right) => left.group.localeCompare(right.group, undefined, { numeric: true }))[slotIndex]; return <td key={`${week}-${shift}`}>{assignment?.group ?? '—'}</td> }))}</tr>))}</tbody></table></div></section>}
     <div className="schedule-meta"><span><i className="dot teal-dot" /> {isGenerated ? 'Schedule generated' : 'No schedule generated'}</span><span>Showing {matchingAssignments.length} of {assignments.length} assignments</span><span className="meta-right">Capacity is measured per area, week and shift</span></div>
-    <section className="card schedule-table-card"><div className="table-scroll"><table className="schedule-table"><thead><tr><th className="category-col">Category / Area</th><th>AM <small>Morning</small></th><th>PM <small>Afternoon</small></th><th>NOC <small>Night</small></th><th className="capacity-col">Max / shift</th></tr></thead><tbody>{visibleAreas.map((area) => <tr key={area.name} className={`category-tone-${area.categoryIndex % 7}`}><td><div className="area-name"><span className="category-marker" /><div><strong>{area.name}</strong><small>{area.category}</small></div></div></td>{shifts.map((shift) => { const rows = matchingAssignments.filter((assignment) => assignment.category === area.category && assignment.area === area.name && assignment.shift === shift); return <td key={shift}><div className="assignment-list">{rows.map((assignment) => <button className="group-chip editable-chip" key={`${assignment.group}-${assignment.week}`} title={`Move ${assignment.group} in Week ${assignment.week} to the next shift`} onClick={() => updateAssignment(assignment.group, assignment.week, 'shift', shifts[(shifts.indexOf(assignment.shift) + 1) % shifts.length])}>{assignment.group}{selectedWeek === 0 ? ` · W${assignment.week}` : ''}</button>)}{!rows.length && <span className="empty-slot">—</span>}</div></td>})}<td><span className="capacity-badge">1 / shift</span></td></tr>)}</tbody></table>{visibleAreas.length === 0 && <p className="tracking-empty">{assignments.length ? 'No assignments match the selected week, filters, or search.' : 'Generate a schedule to view assignments.'}</p>}</div><div className="table-footer"><span><strong>{new Set(matchingAssignments.map((assignment) => assignment.group)).size}</strong> of {groupCount} groups assigned in this view</span><span><strong>{visibleAreas.length}</strong> clinical areas shown</span></div></section>
+    <section className="card schedule-table-card"><div className="table-scroll"><table className="schedule-table"><thead><tr><th className="category-col">Category / Area</th><th>AM <small>Morning</small></th><th>PM <small>Afternoon</small></th><th>NOC <small>Night</small></th><th className="capacity-col">Slot / max</th></tr></thead><tbody>{visibleSlots.map((area) => <tr key={`${area.category}-${area.name}-${area.slotIndex}`} className={`category-tone-${area.categoryIndex % 7}`}><td><div className="area-name"><span className="category-marker" /><div><strong>{area.name}</strong>{area.capacity > 1 && <small>Slot {area.slotIndex + 1}</small>}<small>{area.category}</small></div></div></td>{shifts.map((shift) => { const rows = getSlotAssignments(area, shift, area.slotIndex, matchingAssignments); return <td key={shift}><div className="assignment-list">{rows.map((assignment) => <button className="group-chip editable-chip" key={`${assignment.group}-${assignment.week}`} title={`Move ${assignment.group} in Week ${assignment.week} to the next shift`} onClick={() => updateAssignment(assignment.group, assignment.week, 'shift', shifts[(shifts.indexOf(assignment.shift) + 1) % shifts.length])}>{assignment.group}{selectedWeek === 0 ? ` · W${assignment.week}` : ''}</button>)}{!rows.length && <span className="empty-slot">—</span>}</div></td>})}<td><span className="capacity-badge">{area.slotIndex + 1} / {area.capacity}</span></td></tr>)}</tbody></table>{visibleAreas.length === 0 && <p className="tracking-empty">{assignments.length ? 'No assignments match the selected week, filters, or search.' : 'Generate a schedule to view assignments.'}</p>}</div><div className="table-footer"><span><strong>{new Set(matchingAssignments.map((assignment) => assignment.group)).size}</strong> of {groupCount} groups assigned in this view</span><span><strong>{visibleAreas.length}</strong> clinical areas shown</span></div></section>
   </>
 }
 

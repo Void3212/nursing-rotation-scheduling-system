@@ -1,6 +1,6 @@
 # SchedMom Rotation Planner
 
-A nursing clinical rotation planner with editable rotation rules, schedule generation, validation, tracking, CSV export, local schedule history, and optional Supabase synchronization.
+A nursing clinical rotation planner with editable area capacities, NOC eligibility and weekly coverage requirements, schedule generation, validation, tracking, CSV export, local schedule history, and optional Supabase synchronization.
 
 ## Run locally
 
